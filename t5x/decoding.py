@@ -806,7 +806,6 @@ def beam_search(inputs: jnp.ndarray,
   # We liberally annotate shape information for clarity below.
 
   beam_size = num_decodes
-
   batch_size = inputs.shape[0]
   end_marker = jnp.array(eos_id)
   if max_decode_len is None:
@@ -899,9 +898,28 @@ def beam_search(inputs: jnp.ndarray,
                             beam_size, beams_to_keep)
 
     # Append the most probable 2*K token IDs to the top 2*K sequences
-    # Recover token id by modulo division and expand Id array for broadcasting.
+    # Recover token id by modulo division.
+    topk_ids = topk_indices % vocab_size
+    # Force decode `inputs` into topk_ids up until PAD. When `inputs` is all
+    # PADs this is a no-op.
+    next_input_token = jnp.expand_dims(
+        inputs, axis=1).astype(jnp.int32)[:, :, state.cur_index + 1]
+    out_of_prompt = (next_input_token == 0)
+    topk_ids = topk_ids * out_of_prompt + next_input_token * ~out_of_prompt
+    # When forcing prompts, update log probabilities to 0 for the top of the
+    # beam and -INF for the rest, effectively keeping only one beam alive.
+    out_of_prompt_log_probs = jnp.concatenate([
+        jnp.full_like(topk_log_probs[:, 0:1], 0),
+        jnp.full_like(topk_log_probs[:, :beams_to_keep - 1], NEG_INF)
+    ],
+                                              axis=1)
+    topk_log_probs = (
+        topk_log_probs * out_of_prompt +
+        out_of_prompt_log_probs * ~out_of_prompt)
+
+    # Expand id array for broadcasting
     # --> [batch, 2*beams, 1]
-    topk_ids = jnp.expand_dims(topk_indices % vocab_size, axis=2)
+    topk_ids = jnp.expand_dims(topk_ids, axis=2)
     # Update sequences for the 2*K top-k new sequences.
     # --> [batch, 2*beams, length]
     topk_seq = lax.dynamic_update_slice(topk_seq, topk_ids,

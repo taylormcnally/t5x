@@ -459,6 +459,7 @@ class EncoderDecoderModel(BaseTransformerModel):
       decoder_params: Optional[MutableMapping[str, Any]] = None,
       return_all_decodes: bool = False,
       num_decodes: int = 1,
+      force_decode_inputs: bool = False
   ) -> Tuple[jnp.ndarray, Mapping[str, jnp.ndarray]]:
     """Predict with fast decoding beam search on a batch.
 
@@ -491,12 +492,17 @@ class EncoderDecoderModel(BaseTransformerModel):
     `jax.random.PRNGKey(seed)` with different `seed` value). This can be done by
     setting `decoder_params['decode_rng'] = jax.random.PRNGKey(seed)`.
 
+    If `force_decode_inputs = True`, then `decoder_prompt_inputs` is initialized
+    from the batch's `decoder_prompt_inputs`. The EOS is stripped to avoid
+    decoding to stop after the prompt by matching to `output_vocabulary.eos_id`.
+
     Args:
       params: model parameters.
       batch: a batch of inputs.
       decoder_params: additional (model-independent) parameters for the decoder.
       return_all_decodes: whether to return the entire beam or just the top-1.
       num_decodes: the number of beams to use in beam search.
+      force_decode_inputs: Whether the force decode decoder_inputs.
 
     Returns:
       A tuple containing:
@@ -546,10 +552,12 @@ class EncoderDecoderModel(BaseTransformerModel):
     if decoder_params is None:
       decoder_params = {}
 
-    # For beam search, `decoder_prompt_inputs` is only used to obtain batch size
-    # and max decode length information. For temperature sampling,
-    # `decod_prompt_inputs` will be filled with the sampled ids.
-    decoder_prompt_inputs = jnp.zeros_like(batch['decoder_input_tokens'])
+    if force_decode_inputs:
+      decoder_prompt_inputs = batch['decoder_input_tokens']
+      decoder_prompt_inputs = decoder_prompt_inputs * (
+          decoder_prompt_inputs != self.output_vocabulary.eos_id)
+    else:
+      decoder_prompt_inputs = jnp.zeros_like(batch['decoder_input_tokens'])
 
     # TODO(hwchung): rename the returned value names to more generic ones.
     # Using the above-defined single-step decoder function, run a
