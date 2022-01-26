@@ -15,7 +15,7 @@
 """Fast decoding routines for inference from a trained model."""
 import functools
 
-from typing import Callable, Mapping, Optional, Tuple
+from typing import Callable, Mapping, Optional, Tuple, Union
 import flax
 from flax import traverse_util
 import jax
@@ -47,12 +47,12 @@ def temperature_sample(
     eos_id: int,
     decode_rng: Optional[jnp.ndarray] = None,
     num_decodes: int = 1,
-    temperature: float = 1.0,
+    temperature: Union[float, jnp.ndarray] = 1.0,
     topk: int = 1,
     topp: float = 0.0,
     cache_offset: int = 0,
     initial_index: Optional[jnp.ndarray] = None,
-    max_decode_steps: Optional[int] = None,
+    max_decode_steps: Optional[Union[int, jnp.ndarray]] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
   """Temperature sampling for language model generation.
 
@@ -216,6 +216,10 @@ def temperature_sample(
     [batch_size, num_decodes, max_decode_len] sorted by `log_prob`, which is log
     probability of each of the sampled sequences.
   """
+  if not isinstance(topk, int) or not isinstance(topp, float):
+    raise ValueError(
+        'topk and topp must be Python integer and float types, respectively.')
+
   if decode_rng is None:
     decode_rng = jax.random.PRNGKey(0)
 
@@ -274,14 +278,14 @@ def _temperature_sample_single_trial(
     topk: int = 20,
     topp: float = 0.0,
     initial_index: Optional[jnp.ndarray] = None,
-    max_decode_steps: Optional[int] = None) -> jnp.ndarray:
+    max_decode_steps: Optional[Union[int, jnp.ndarray]] = None) -> jnp.ndarray:
   """A helper function for `temperature_sample`."""
   if topp and topk:
     raise ValueError('At most one of `topp` or `topk` must be non-zero.')
   batch_size, max_decode_len = inputs.shape
 
   if max_decode_steps is not None:
-    if max_decode_steps > inputs.shape[1]:
+    if isinstance(max_decode_steps, int) and max_decode_steps > inputs.shape[1]:
       raise ValueError('Cannot decode more steps than the sequence length.')
 
     # the number of decode steps required to process the prefix is the number
