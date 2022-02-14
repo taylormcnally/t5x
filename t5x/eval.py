@@ -33,9 +33,9 @@ from clu import metric_writers
 import jax
 import seqio
 from t5x import gin_utils
+from t5x import model_inference as infer
 from t5x import models
 from t5x import multihost_utils
-from t5x import partitioning
 from t5x import utils
 from typing_extensions import Protocol
 
@@ -57,31 +57,25 @@ def evaluate(
     *,
     model: models.BaseTransformerModel,
     dataset_cfg: utils.DatasetConfig,
-    restore_checkpoint_cfg: utils.RestoreCheckpointConfig,
-    partitioner: partitioning.BasePartitioner,
     output_dir: str,
     inference_evaluator_cls: Type[seqio.Evaluator] = seqio.Evaluator,
     summarize_config_fn: SummarizeConfigFn = gin_utils.summarize_gin_config,
-    fallback_init_rng: Optional[int] = None):
+    model_inference_cls: Type[
+        infer.BaseModelInference] = infer.LocalModelInference,
+    **kwargs):
   """Evaluation function.
 
   Args:
     model: The model object to use for inference.
     dataset_cfg: Specification for the dataset to infer based on.
-    restore_checkpoint_cfg: Specification for the model parameter checkpoint to
-      load.
-    partitioner: Partitioner for the model parameters and data across devices.
     output_dir: Path to directory to write temporary files and final results.
     inference_evaluator_cls: seqio.Evaluator class to use for inference
       evaluation, potentially with bound configuration args.
     summarize_config_fn: A function that takes in the model directory, an
       optional SummaryWriter, and the step number, and writes a summary of the
       configuration. SummaryWriter will be None in most cases.
-    fallback_init_rng: A random seed used for parameter initialization during
-      model re-loading when utils.RestoreCheckpointConfig.fallback_to_scratch
-      is set to True. If None, parameter initialization is not allowed during
-      model loading and having fallback_to_scratch enabled will result in an
-      error.
+    model_inference_cls: BaseModelInference class to use for model inferences.
+    **kwargs: All other parameters to be passed to model_inference_cls.
   """
   logging.info('Process ID: %d', jax.process_index())
   if dataset_cfg.module:
@@ -100,12 +94,17 @@ def evaluate(
                      f'  model.output_vocabulary={model.output_vocabulary}\n')
 
   # ----------------------------------------------------------------------------
+  # T5X model loading.
+  # ----------------------------------------------------------------------------
+  model_infer = model_inference_cls(model, **kwargs)
+
+  # ----------------------------------------------------------------------------
   # SeqIO (inference-based) evaluation setup
   # ----------------------------------------------------------------------------
   # Init evaluator to set up cached datasets
   evaluator = inference_evaluator_cls(
       mixture_or_task_name=dataset_cfg.mixture_or_task_name,
-      feature_converter=model.FEATURE_CONVERTER_CLS(pack=False),  # pytype:disable=not-instantiable
+      feature_converter=model_infer.feature_converter,
       eval_split=dataset_cfg.split,
       use_cached=dataset_cfg.use_cached,
       seed=dataset_cfg.seed,
@@ -115,47 +114,8 @@ def evaluate(
     raise ValueError(
         f"'{dataset_cfg.mixture_or_task_name}' has no metrics for evaluation.")
 
-  # ----------------------------------------------------------------------------
-  # T5X model loading.
-  # ----------------------------------------------------------------------------
-
-  # Initialize optimizer from the existing checkpoint.
-  input_shapes = {
-      k: (batch_size,) + s for k, s in evaluator.model_feature_shapes.items()
-  }
-
-  train_state_initializer = utils.TrainStateInitializer(
-      optimizer_def=None,  # Do not load optimizer state.
-      init_fn=model.get_initial_variables,
-      input_shapes=input_shapes,
-      partitioner=partitioner)
-  train_state_axes = train_state_initializer.train_state_axes
-
-  predict_fn = None
-  score_fn = None
-
-  # Disable strictness since we are dropping the optimizer state.
-  restore_checkpoint_cfg.strict = False
-
-  if fallback_init_rng is not None:
-    fallback_init_rng = jax.random.PRNGKey(fallback_init_rng)
-  for train_state in train_state_initializer.from_checkpoints(
-      [restore_checkpoint_cfg], init_rng=fallback_init_rng):
-
-    # Compile the model only once.
-    if not predict_fn:
-      predict_fn = utils.get_infer_fn(
-          infer_step=model.predict_batch,
-          batch_size=batch_size,
-          train_state_axes=train_state_axes,
-          partitioner=partitioner)
-
-      score_fn = utils.get_infer_fn(
-          infer_step=model.score_batch,
-          batch_size=batch_size,
-          train_state_axes=train_state_axes,
-          partitioner=partitioner)
-
+  model_infer.initialize_with_shapes(evaluator.model_feature_shapes, batch_size)
+  for state in model_infer.state_iterations():
     # ----------------------------------------------------------------------------
     # Main training loop
     # ----------------------------------------------------------------------------
@@ -163,12 +123,12 @@ def evaluate(
     # Run final evaluation (with decoding) on the full eval dataset.
     all_metrics, _, _ = evaluator.evaluate(
         compute_metrics=jax.process_index() == 0,
-        step=int(train_state.step),
-        predict_fn=functools.partial(predict_fn, train_state=train_state),
-        score_fn=functools.partial(score_fn, train_state=train_state))
+        step=int(state.step),
+        predict_fn=functools.partial(model_infer.predict_fn, state=state),
+        score_fn=functools.partial(model_infer.score_fn, state=state))
     all_metrics.result()  # Ensure metrics are finished being computed.
     # Wait until computations are done before continuing.
-    multihost_utils.sync_devices(f'step_{train_state.step}:complete')
+    multihost_utils.sync_devices(f'step_{state.step}:complete')
 
   logging.info('Finished.')
 
