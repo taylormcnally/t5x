@@ -251,21 +251,24 @@ class BaseTransformerModel(BaseModel):
       params: PyTreeDef,
       batch: Mapping[str, jnp.ndarray],
       dropout_rng: Optional[jnp.ndarray],
-      label_smoothing: Optional[float] = None,
-      z_loss: Optional[float] = None,
-      loss_normalizing_factor: Union[Optional[Union[
-          float, int, str, losses.SpecialLossNormalizingFactor]],
-                                     object] = _NoValueSentinel,
+      # label_smoothing: Optional[float] = None,
+      # z_loss: Optional[float] = None,
+      # loss_normalizing_factor: Union[Optional[Union[
+      #     float, int, str, losses.SpecialLossNormalizingFactor]],
+      #                                object] = _NoValueSentinel,
   ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, MetricsMap]]:
     """Loss function used for training with a cross-entropy loss."""
 
     # Default these to the constructor values. In the future, they may be
     # removed as parameters for `loss_fn`.
-    label_smoothing = (
-        self._label_smoothing if label_smoothing is None else label_smoothing)
-    z_loss = self._z_loss if z_loss is None else z_loss
-    if loss_normalizing_factor is _NoValueSentinel:
-      loss_normalizing_factor = self._loss_normalizing_factor
+    label_smoothing = self._label_smoothing
+    z_loss = self._z_loss
+    loss_normalizing_factor = self._loss_normalizing_factor
+    # label_smoothing = (
+    #     self._label_smoothing if label_smoothing is None else label_smoothing)
+    # z_loss = self._z_loss if z_loss is None else z_loss
+    # if loss_normalizing_factor is _NoValueSentinel:
+    #   loss_normalizing_factor = self._loss_normalizing_factor
 
     logits = self._compute_logits(params, batch, dropout_rng)
 
@@ -332,27 +335,6 @@ class EncoderDecoderModel(BaseTransformerModel):
         z_loss=z_loss,
         loss_normalizing_factor=loss_normalizing_factor,
     )
-
-  # Adds explicit loss method for proper configuration.
-  # TODO(b/194404217): Remove once gin correctly handles child class configs.
-  def loss_fn(
-      self,
-      params: PyTreeDef,
-      batch: Mapping[str, jnp.ndarray],
-      dropout_rng: Optional[jnp.ndarray],
-      label_smoothing: Optional[float] = None,
-      z_loss: Optional[float] = None,
-      loss_normalizing_factor: Union[Optional[float],
-                                     object] = _NoValueSentinel,
-  ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, MetricsMap]]:
-
-    return super().loss_fn(
-        params=params,
-        batch=batch,
-        dropout_rng=dropout_rng,
-        label_smoothing=label_smoothing,
-        z_loss=z_loss,
-        loss_normalizing_factor=loss_normalizing_factor)
 
   def get_initial_variables(
       self,
